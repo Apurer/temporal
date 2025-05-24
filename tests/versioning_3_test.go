@@ -68,14 +68,10 @@ type Versioning3Suite struct {
 	useV32 bool
 }
 
-func NewVersioning3Suite(useV32 bool) *Versioning3Suite {
-	return &Versioning3Suite{useV32: useV32}
-}
-
 func TestVersioning3FunctionalSuite(t *testing.T) {
 	t.Parallel()
-	suite.Run(t, NewVersioning3Suite(true))
-	suite.Run(t, NewVersioning3Suite(false))
+	suite.Run(t, &Versioning3Suite{useV32: true})
+	suite.Run(t, &Versioning3Suite{useV32: false})
 }
 
 func (s *Versioning3Suite) SetupSuite() {
