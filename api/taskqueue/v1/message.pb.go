@@ -19,6 +19,7 @@ import (
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	emptypb "google.golang.org/protobuf/types/known/emptypb"
+	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
 )
 
 const (
@@ -497,6 +498,8 @@ type TaskForwardInfo struct {
 	// In case of multiple hops, this is the source partition of the last hop.
 	SourcePartition string         `protobuf:"bytes,1,opt,name=source_partition,json=sourcePartition,proto3" json:"source_partition,omitempty"`
 	TaskSource      v14.TaskSource `protobuf:"varint,2,opt,name=task_source,json=taskSource,proto3,enum=temporal.server.api.enums.v1.TaskSource" json:"task_source,omitempty"`
+	// This is the time that first matching partition received the task.
+	TaskCreateTime *timestamppb.Timestamp `protobuf:"bytes,6,opt,name=task_create_time,json=taskCreateTime,proto3" json:"task_create_time,omitempty"`
 	// Redirect info is not present for Query and Nexus tasks. Versioning decisions for activity/workflow
 	// tasks are made at the source partition and sent to the parent partition in this message so that parent partition
 	// does not have to make versioning decision again. For Query/Nexus tasks, this works differently as the child's
@@ -557,6 +560,13 @@ func (x *TaskForwardInfo) GetTaskSource() v14.TaskSource {
 	return v14.TaskSource(0)
 }
 
+func (x *TaskForwardInfo) GetTaskCreateTime() *timestamppb.Timestamp {
+	if x != nil {
+		return x.TaskCreateTime
+	}
+	return nil
+}
+
 func (x *TaskForwardInfo) GetRedirectInfo() *BuildIdRedirectInfo {
 	if x != nil {
 		return x.RedirectInfo
@@ -582,7 +592,7 @@ var File_temporal_server_api_taskqueue_v1_message_proto protoreflect.FileDescrip
 
 const file_temporal_server_api_taskqueue_v1_message_proto_rawDesc = "" +
 	"\n" +
-	".temporal/server/api/taskqueue/v1/message.proto\x12 temporal.server.api.taskqueue.v1\x1a\x1bgoogle/protobuf/empty.proto\x1a(temporal/api/deployment/v1/message.proto\x1a&temporal/api/enums/v1/task_queue.proto\x1a$temporal/api/enums/v1/workflow.proto\x1a'temporal/api/taskqueue/v1/message.proto\x1a'temporal/server/api/enums/v1/task.proto\x1a/temporal/server/api/deployment/v1/message.proto\"\x96\x03\n" +
+	".temporal/server/api/taskqueue/v1/message.proto\x12 temporal.server.api.taskqueue.v1\x1a\x1bgoogle/protobuf/empty.proto\x1a(temporal/api/deployment/v1/message.proto\x1a&temporal/api/enums/v1/task_queue.proto\x1a$temporal/api/enums/v1/workflow.proto\x1a'temporal/api/taskqueue/v1/message.proto\x1a'temporal/server/api/enums/v1/task.proto\x1a/temporal/server/api/deployment/v1/message.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"\x96\x03\n" +
 	"\x14TaskVersionDirective\x12J\n" +
 	"\x14use_assignment_rules\x18\x01 \x01(\v2\x16.google.protobuf.EmptyH\x00R\x12useAssignmentRules\x12,\n" +
 	"\x11assigned_build_id\x18\x02 \x01(\tH\x00R\x0fassignedBuildId\x12E\n" +
@@ -616,11 +626,12 @@ const file_temporal_server_api_taskqueue_v1_message_proto_rawDesc = "" +
 	"stickyNameB\x0e\n" +
 	"\fpartition_id\"A\n" +
 	"\x13BuildIdRedirectInfo\x12*\n" +
-	"\x11assigned_build_id\x18\x01 \x01(\tR\x0fassignedBuildId\"\xc1\x02\n" +
+	"\x11assigned_build_id\x18\x01 \x01(\tR\x0fassignedBuildId\"\x87\x03\n" +
 	"\x0fTaskForwardInfo\x12)\n" +
 	"\x10source_partition\x18\x01 \x01(\tR\x0fsourcePartition\x12I\n" +
 	"\vtask_source\x18\x02 \x01(\x0e2(.temporal.server.api.enums.v1.TaskSourceR\n" +
-	"taskSource\x12Z\n" +
+	"taskSource\x12D\n" +
+	"\x10task_create_time\x18\x06 \x01(\v2\x1a.google.protobuf.TimestampR\x0etaskCreateTime\x12Z\n" +
 	"\rredirect_info\x18\x03 \x01(\v25.temporal.server.api.taskqueue.v1.BuildIdRedirectInfoR\fredirectInfo\x12*\n" +
 	"\x11dispatch_build_id\x18\x04 \x01(\tR\x0fdispatchBuildId\x120\n" +
 	"\x14dispatch_version_set\x18\x05 \x01(\tR\x12dispatchVersionSetB2Z0go.temporal.io/server/api/taskqueue/v1;taskqueueb\x06proto3"
@@ -655,6 +666,7 @@ var file_temporal_server_api_taskqueue_v1_message_proto_goTypes = []any{
 	(*v13.TaskQueueStats)(nil),           // 13: temporal.api.taskqueue.v1.TaskQueueStats
 	(v1.TaskQueueType)(0),                // 14: temporal.api.enums.v1.TaskQueueType
 	(v14.TaskSource)(0),                  // 15: temporal.server.api.enums.v1.TaskSource
+	(*timestamppb.Timestamp)(nil),        // 16: google.protobuf.Timestamp
 }
 var file_temporal_server_api_taskqueue_v1_message_proto_depIdxs = []int32{
 	7,  // 0: temporal.server.api.taskqueue.v1.TaskVersionDirective.use_assignment_rules:type_name -> google.protobuf.Empty
@@ -668,12 +680,13 @@ var file_temporal_server_api_taskqueue_v1_message_proto_depIdxs = []int32{
 	1,  // 8: temporal.server.api.taskqueue.v1.PhysicalTaskQueueInfo.internal_task_queue_status:type_name -> temporal.server.api.taskqueue.v1.InternalTaskQueueStatus
 	14, // 9: temporal.server.api.taskqueue.v1.TaskQueuePartition.task_queue_type:type_name -> temporal.api.enums.v1.TaskQueueType
 	15, // 10: temporal.server.api.taskqueue.v1.TaskForwardInfo.task_source:type_name -> temporal.server.api.enums.v1.TaskSource
-	5,  // 11: temporal.server.api.taskqueue.v1.TaskForwardInfo.redirect_info:type_name -> temporal.server.api.taskqueue.v1.BuildIdRedirectInfo
-	12, // [12:12] is the sub-list for method output_type
-	12, // [12:12] is the sub-list for method input_type
-	12, // [12:12] is the sub-list for extension type_name
-	12, // [12:12] is the sub-list for extension extendee
-	0,  // [0:12] is the sub-list for field type_name
+	16, // 11: temporal.server.api.taskqueue.v1.TaskForwardInfo.task_create_time:type_name -> google.protobuf.Timestamp
+	5,  // 12: temporal.server.api.taskqueue.v1.TaskForwardInfo.redirect_info:type_name -> temporal.server.api.taskqueue.v1.BuildIdRedirectInfo
+	13, // [13:13] is the sub-list for method output_type
+	13, // [13:13] is the sub-list for method input_type
+	13, // [13:13] is the sub-list for extension type_name
+	13, // [13:13] is the sub-list for extension extendee
+	0,  // [0:13] is the sub-list for field type_name
 }
 
 func init() { file_temporal_server_api_taskqueue_v1_message_proto_init() }

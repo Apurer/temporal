@@ -519,6 +519,10 @@ func (e *matchingEngineImpl) AddWorkflowTask(
 	if expirationDuration != 0 {
 		expirationTime = timestamppb.New(now.Add(expirationDuration))
 	}
+	createTime := addRequest.GetForwardInfo().GetTaskCreateTime()
+	if createTime == nil {
+		createTime = timestamppb.New(now)
+	}
 	taskInfo := &persistencespb.TaskInfo{
 		NamespaceId:      addRequest.NamespaceId,
 		RunId:            addRequest.Execution.GetRunId(),
@@ -526,7 +530,7 @@ func (e *matchingEngineImpl) AddWorkflowTask(
 		ScheduledEventId: addRequest.GetScheduledEventId(),
 		Clock:            addRequest.GetClock(),
 		ExpiryTime:       expirationTime,
-		CreateTime:       timestamppb.New(now),
+		CreateTime:       createTime,
 		VersionDirective: addRequest.VersionDirective,
 		Priority:         addRequest.Priority,
 	}
@@ -557,13 +561,17 @@ func (e *matchingEngineImpl) AddActivityTask(
 	if expirationDuration != 0 {
 		expirationTime = timestamppb.New(now.Add(expirationDuration))
 	}
+	createTime := addRequest.GetForwardInfo().GetTaskCreateTime()
+	if createTime == nil {
+		createTime = timestamppb.New(now)
+	}
 	taskInfo := &persistencespb.TaskInfo{
 		NamespaceId:      addRequest.NamespaceId,
 		RunId:            addRequest.Execution.GetRunId(),
 		WorkflowId:       addRequest.Execution.GetWorkflowId(),
 		ScheduledEventId: addRequest.GetScheduledEventId(),
 		Clock:            addRequest.GetClock(),
-		CreateTime:       timestamppb.New(now),
+		CreateTime:       createTime,
 		ExpiryTime:       expirationTime,
 		VersionDirective: addRequest.VersionDirective,
 		Stamp:            addRequest.Stamp,
