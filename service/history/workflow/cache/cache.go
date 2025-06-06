@@ -10,6 +10,7 @@ import (
 	"github.com/pborman/uuid"
 	commonpb "go.temporal.io/api/common/v1"
 	"go.temporal.io/api/serviceerror"
+
 	"go.temporal.io/server/common/cache"
 	"go.temporal.io/server/common/definition"
 	"go.temporal.io/server/common/finalizer"
@@ -92,6 +93,7 @@ func NewHostLevelCache(
 		maxSize,
 		config.HistoryCacheTTL(),
 		config.HistoryCacheNonUserContextLockTimeout(),
+		config.HistoryCacheActiveExpiry(),
 		logger,
 		handler,
 	)
@@ -110,6 +112,7 @@ func NewShardLevelCache(
 		maxSize,
 		config.HistoryCacheTTL(),
 		config.HistoryCacheNonUserContextLockTimeout(),
+		false,
 		logger,
 		handler,
 	)
@@ -119,12 +122,16 @@ func newCache(
 	size int,
 	ttl time.Duration,
 	nonUserContextLockTimeout time.Duration,
+	activeExpiry bool,
 	logger log.Logger,
 	handler metrics.Handler,
 ) Cache {
 	opts := &cache.Options{
 		TTL: ttl,
 		Pin: true,
+		ActiveExpiry: cache.ActiveExpiryOptions{
+			Enabled: activeExpiry,
+		},
 		OnPut: func(val any) {
 			//revive:disable-next-line:unchecked-type-assertion
 			item := val.(*cacheItem)

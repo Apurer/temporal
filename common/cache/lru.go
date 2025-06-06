@@ -2,12 +2,15 @@ package cache
 
 import (
 	"container/list"
+	"context"
 	"sync"
 	"time"
 
 	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/api/serviceerror"
+
 	"go.temporal.io/server/common/clock"
+	"go.temporal.io/server/common/goro"
 	"go.temporal.io/server/common/metrics"
 )
 
@@ -39,6 +42,8 @@ type (
 		pin            bool
 		timeSource     clock.TimeSource
 		metricsHandler metrics.Handler
+		activeExpiry   ActiveExpiryOptions
+		loops          goro.Group
 	}
 
 	iteratorImpl struct {
@@ -49,7 +54,7 @@ type (
 
 	entryImpl struct {
 		key        interface{}
-		createTime time.Time
+		lastAccess time.Time
 		value      interface{}
 		refCount   int
 		size       int
@@ -79,7 +84,7 @@ func (it *iteratorImpl) Next() Entry {
 		key:        entry.key,
 		value:      entry.value,
 		size:       entry.size,
-		createTime: entry.createTime,
+		lastAccess: entry.lastAccess,
 	}
 	it.prepareNext()
 	return entry
@@ -125,17 +130,17 @@ func (entry *entryImpl) Size() int {
 }
 
 func (entry *entryImpl) CreateTime() time.Time {
-	return entry.createTime
+	return entry.lastAccess
 }
 
 // New creates a new cache with the given options
-func New(maxSize int, opts *Options) Cache {
+func New(maxSize int, opts *Options) ActiveExpiryCache {
 	return NewWithMetrics(maxSize, opts, metrics.NoopMetricsHandler)
 }
 
 // NewWithMetrics creates a new cache that will emit capacity and ttl metrics.
 // handler should be tagged with metrics.CacheTypeTag.
-func NewWithMetrics(maxSize int, opts *Options, handler metrics.Handler) Cache {
+func NewWithMetrics(maxSize int, opts *Options, handler metrics.Handler) ActiveExpiryCache {
 	if opts == nil {
 		opts = &Options{}
 	}
@@ -146,7 +151,7 @@ func NewWithMetrics(maxSize int, opts *Options, handler metrics.Handler) Cache {
 
 	metrics.CacheSize.With(handler).Record(float64(maxSize))
 	metrics.CacheTtl.With(handler).Record(opts.TTL)
-	return &lru{
+	c := &lru{
 		byAccess:       list.New(),
 		byKey:          make(map[interface{}]*list.Element),
 		ttl:            opts.TTL,
@@ -157,12 +162,17 @@ func NewWithMetrics(maxSize int, opts *Options, handler metrics.Handler) Cache {
 		onEvict:        opts.OnEvict,
 		timeSource:     timeSource,
 		metricsHandler: handler,
+		activeExpiry:   opts.ActiveExpiry.SetDefaults(),
 	}
+	if c.ttl != 0 && c.activeExpiry.Enabled {
+		c.loops.Go(c.evictLoop)
+	}
+	return c
 }
 
 // NewLRU creates a new LRU cache of the given size, setting initial capacity
 // to the max size
-func NewLRU(maxSize int, handler metrics.Handler) Cache {
+func NewLRU(maxSize int, handler metrics.Handler) ActiveExpiryCache {
 	return New(maxSize, nil)
 }
 
@@ -181,15 +191,16 @@ func (c *lru) Get(key interface{}) interface{} {
 
 	entry := element.Value.(*entryImpl)
 
-	metrics.CacheEntryAgeOnGet.With(c.metricsHandler).Record(c.timeSource.Now().UTC().Sub(entry.createTime))
-
 	if c.isEntryExpired(entry, c.timeSource.Now().UTC()) {
 		// Entry has expired
 		c.deleteInternal(element)
 		return nil
 	}
 
+	metrics.CacheEntryAgeOnGet.With(c.metricsHandler).Record(c.timeSource.Now().UTC().Sub(entry.lastAccess))
+
 	c.updateEntryRefCount(entry)
+	c.updateLastAccess(entry)
 	c.byAccess.MoveToFront(element)
 	return entry.value
 }
@@ -310,7 +321,7 @@ func (c *lru) putInternal(key interface{}, value interface{}, allowUpdate bool) 
 				existingEntry.size = newEntrySize
 				c.currSize = newCacheSize
 				metrics.CacheUsage.With(c.metricsHandler).Record(float64(c.currSize))
-				c.updateEntryTTL(existingEntry)
+				c.updateLastAccess(existingEntry)
 
 				if c.onPut != nil {
 					c.onPut(value)
@@ -339,7 +350,7 @@ func (c *lru) putInternal(key interface{}, value interface{}, allowUpdate bool) 
 		value: value,
 		size:  newEntrySize,
 	}
-	c.updateEntryTTL(entry)
+	c.updateLastAccess(entry)
 	c.updateEntryRefCount(entry)
 	element := c.byAccess.PushFront(entry)
 	c.byKey[key] = element
@@ -361,7 +372,7 @@ func (c *lru) deleteInternal(element *list.Element) {
 	entry := c.byAccess.Remove(element).(*entryImpl)
 	c.currSize -= entry.Size()
 	metrics.CacheUsage.With(c.metricsHandler).Record(float64(c.currSize))
-	metrics.CacheEntryAgeOnEviction.With(c.metricsHandler).Record(c.timeSource.Now().UTC().Sub(entry.createTime))
+	metrics.CacheEntryAgeOnEviction.With(c.metricsHandler).Record(c.timeSource.Now().UTC().Sub(entry.lastAccess))
 	delete(c.byKey, entry.key)
 
 	if c.onEvict != nil {
@@ -406,12 +417,12 @@ func (c *lru) tryEvictAndGetPreviousElement(entry *entryImpl, element *list.Elem
 }
 
 func (c *lru) isEntryExpired(entry *entryImpl, currentTime time.Time) bool {
-	return entry.refCount == 0 && !entry.createTime.IsZero() && currentTime.After(entry.createTime.Add(c.ttl))
+	return entry.refCount == 0 && !entry.lastAccess.IsZero() && currentTime.After(entry.lastAccess.Add(c.ttl))
 }
 
-func (c *lru) updateEntryTTL(entry *entryImpl) {
+func (c *lru) updateLastAccess(entry *entryImpl) {
 	if c.ttl != 0 {
-		entry.createTime = c.timeSource.Now().UTC()
+		entry.lastAccess = c.timeSource.Now().UTC()
 	}
 }
 
@@ -422,5 +433,58 @@ func (c *lru) updateEntryRefCount(entry *entryImpl) {
 			c.pinnedSize += entry.Size()
 			metrics.CachePinnedUsage.With(c.metricsHandler).Record(float64(c.pinnedSize))
 		}
+	}
+}
+
+func (c *lru) Stop() {
+	c.loops.Cancel()
+}
+
+func (c *lru) evictLoop(ctx context.Context) error {
+	ch, t := c.timeSource.NewTimer(c.activeExpiry.LoopInterval)
+	for {
+		select {
+		case <-ch:
+			c.evict()
+			t.Reset(c.activeExpiry.LoopInterval)
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
+func (c *lru) evict() {
+	now := c.timeSource.Now().UTC()
+
+	// This only evicts up to MaxEntryPerCall per call to avoid holding
+	// the cache lock for too long at a time.
+	evictToMax := func() (again bool) {
+		c.mut.Lock()
+		defer c.mut.Unlock()
+
+		limit := c.activeExpiry.MaxEntryPerCall
+		if limit == 0 {
+			return false
+		}
+		element := c.byAccess.Back()
+		for n := 0; n < limit; n++ {
+			if element == nil {
+				return false
+			}
+			elementPrev := element.Prev()
+			entry := element.Value.(*entryImpl)
+			// We stop if this entry is recent, or if its refcount is >0. If due to
+			// refcount, there may be older entries we could evict, but we'll get them
+			// eventually.
+			if !c.isEntryExpired(entry, now) {
+				return false
+			}
+			c.deleteInternal(element)
+			element = elementPrev
+		}
+		return true
+	}
+
+	for evictToMax() {
 	}
 }

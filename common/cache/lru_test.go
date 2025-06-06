@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
 	"go.temporal.io/server/common/clock"
 	"go.temporal.io/server/common/metrics"
 	"go.temporal.io/server/common/metrics/metricstest"
@@ -138,8 +139,7 @@ func TestLRUWithTTL(t *testing.T) {
 	assert.Equal(t, 2, len(snapshot[metrics.CacheUsage.Name()]))
 	assert.Equal(t, float64(0), snapshot[metrics.CacheUsage.Name()][1].Value)
 	assert.Equal(t, 0, cache.Size())
-	assert.Equal(t, 2, len(snapshot[metrics.CacheEntryAgeOnGet.Name()]))
-	assert.Equal(t, time.Millisecond*300, snapshot[metrics.CacheEntryAgeOnGet.Name()][1].Value)
+	assert.Equal(t, 1, len(snapshot[metrics.CacheEntryAgeOnGet.Name()]))
 	assert.Equal(t, time.Millisecond*300, snapshot[metrics.CacheEntryAgeOnEviction.Name()][0].Value)
 }
 
@@ -243,6 +243,7 @@ func TestTTLWithPin(t *testing.T) {
 	cache.Release("A")
 	cache.Release("A")
 	cache.Release("A")
+	timeSource.Advance(time.Millisecond * 100)
 	snapshot = capture.Snapshot()
 	assert.Equal(t, float64(0), snapshot[metrics.CachePinnedUsage.Name()][0].Value)
 	assert.Nil(t, cache.Get("A"))
@@ -734,4 +735,88 @@ func TestCache_InvokeLifecycleCallbacks(t *testing.T) {
 	timeSource.Advance(2 * ttl)
 	assert.Nil(t, cache.Get("key"))
 	require.Equal(t, 2, onEvict, "expected OnEvict callback to be invoked")
+}
+
+func TestCache_ActiveExpiry(t *testing.T) {
+	t.Parallel()
+	r := require.New(t)
+
+	ttl := 10 * time.Minute
+	loopInterval := 1 * time.Minute
+	timeSource := clock.NewEventTimeSource()
+
+	cache := New(5,
+		&Options{
+			TTL:        ttl,
+			TimeSource: timeSource,
+			ActiveExpiry: ActiveExpiryOptions{
+				Enabled:         true,
+				LoopInterval:    loopInterval,
+				MaxEntryPerCall: 1,
+			},
+		},
+	)
+
+	cache.Put(1, 1)
+	r.Equal(1, cache.Size())
+
+	r.Eventually(func() bool {
+		timeSource.Advance(loopInterval)
+		return cache.Size() == 0
+	}, 2*time.Second, 100*time.Millisecond)
+
+	cache.Put(2, 2)
+	timeSource.Advance(ttl / 2)
+	cache.Put(3, 3)
+	r.Equal(2, cache.Size())
+
+	r.Eventually(func() bool {
+		timeSource.Advance(loopInterval)
+		return cache.Size() == 1 && cache.Get(2) == nil && cache.Get(3) == 3
+	}, 2*time.Second, 100*time.Millisecond)
+
+	r.Eventually(func() bool {
+		timeSource.Advance(loopInterval)
+		return cache.Size() == 0 && cache.Get(2) == nil && cache.Get(3) == nil
+	}, 2*time.Second, 100*time.Millisecond)
+}
+
+func TestCache_ActiveExpiryPin(t *testing.T) {
+	t.Parallel()
+	r := require.New(t)
+
+	ttl := 10 * time.Minute
+	loopInterval := 1 * time.Minute
+	timeSource := clock.NewEventTimeSource()
+
+	cache := New(5,
+		&Options{
+			TTL:        ttl,
+			Pin:        true,
+			TimeSource: timeSource,
+			ActiveExpiry: ActiveExpiryOptions{
+				Enabled:         true,
+				LoopInterval:    loopInterval,
+				MaxEntryPerCall: 1,
+			},
+		},
+	)
+
+	cache.PutIfNotExist(1, 1)
+	timeSource.Advance(ttl / 2)
+	cache.Release(1)
+	cache.PutIfNotExist(2, 2)
+	r.Equal(2, cache.Size())
+
+	r.Eventually(func() bool {
+		timeSource.Advance(loopInterval)
+		return cache.Size() == 1 && cache.Get(1) == nil
+	}, 1*time.Second, 100*time.Millisecond)
+
+	cache.Release(2)
+
+	r.Eventually(func() bool {
+		timeSource.Advance(loopInterval)
+		return cache.Size() == 0
+	}, 1*time.Second, 100*time.Millisecond)
 }

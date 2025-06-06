@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"cmp"
 	"time"
 
 	"go.temporal.io/server/common/clock"
@@ -34,6 +35,11 @@ type Cache interface {
 	Size() int
 }
 
+type ActiveExpiryCache interface {
+	Cache
+	Stop()
+}
+
 // Options control the behavior of the cache.
 type Options struct {
 	// TTL controls the time-to-live for a given cache entry.  Cache entries that
@@ -49,6 +55,27 @@ type Options struct {
 	OnPut func(val any)
 
 	OnEvict func(val any)
+
+	// ActiveExpiry if and how the cache will expire and remove entries
+	// in the background.
+	ActiveExpiry ActiveExpiryOptions
+}
+
+const (
+	defaultActiveExpiryLoopInterval    = 5 * time.Minute
+	defaultActiveExpiryMaxEntryPerCall = 4096
+)
+
+type ActiveExpiryOptions struct {
+	Enabled         bool
+	LoopInterval    time.Duration // if not set, defaults to defaultActiveExpiryLoopInterval
+	MaxEntryPerCall int           // if not set, defaults to defaultActiveExpiryMaxEntryPerCall
+}
+
+func (o ActiveExpiryOptions) SetDefaults() ActiveExpiryOptions {
+	o.LoopInterval = cmp.Or(o.LoopInterval, defaultActiveExpiryLoopInterval)
+	o.MaxEntryPerCall = cmp.Or(o.MaxEntryPerCall, defaultActiveExpiryMaxEntryPerCall)
+	return o
 }
 
 // SimpleOptions provides options that can be used to configure SimpleCache.
