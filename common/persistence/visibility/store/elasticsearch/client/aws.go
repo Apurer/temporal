@@ -1,3 +1,5 @@
+//go:build aws
+
 package client
 
 import (

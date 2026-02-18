@@ -1,3 +1,5 @@
+//go:build aws
+
 //go:generate mockgen -package $GOPACKAGE -source query_parser.go -destination query_parser_mock.go -mock_names Interface=MockQueryParser
 
 package s3store

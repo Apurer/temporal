@@ -1,3 +1,5 @@
+//go:build aws
+
 package s3store
 
 import (
