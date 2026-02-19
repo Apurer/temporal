@@ -322,14 +322,25 @@ clusterMetadata:
 dcRedirectionPolicy:
     policy: "noop"
 
+{{- $s3ArchivalEnabled := default .Env.ENABLE_S3_ARCHIVAL "false" | lower -}}
+{{- $s3ArchivalEndpoint := default .Env.S3_ARCHIVAL_ENDPOINT "" -}}
 archival:
   history:
     state: "enabled"
     enableRead: true
     provider:
+      {{- if eq $s3ArchivalEnabled "true" }}
+      s3store:
+        region: "{{ default .Env.S3_ARCHIVAL_REGION "us-east-1" }}"
+        {{- if ne $s3ArchivalEndpoint "" }}
+        endpoint: "{{ $s3ArchivalEndpoint }}"
+        {{- end }}
+        s3ForcePathStyle: {{ default .Env.S3_ARCHIVAL_FORCE_PATH_STYLE "false" }}
+      {{- else }}
       filestore:
         fileMode: "0666"
         dirMode: "0766"
+      {{- end }}
   visibility:
     state: "enabled"
     enableRead: true
@@ -341,8 +352,13 @@ archival:
 namespaceDefaults:
   archival:
     history:
+      {{- if eq $s3ArchivalEnabled "true" }}
+      state: "enabled"
+      URI: "s3://{{ default .Env.S3_ARCHIVAL_BUCKET "temporal-history-archival" }}"
+      {{- else }}
       state: "disabled"
       URI: "file:///tmp/temporal_archival/development"
+      {{- end }}
     visibility:
       state: "disabled"
       URI: "file:///tmp/temporal_vis_archival/development"
