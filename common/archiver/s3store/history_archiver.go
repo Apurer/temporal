@@ -12,12 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/awserr"
-	"github.com/aws/aws-sdk-go/aws/request"
-	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/s3"
-	"github.com/aws/aws-sdk-go/service/s3/s3iface"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"go.temporal.io/api/serviceerror"
 	archiverspb "go.temporal.io/server/api/archiver/v1"
 	"go.temporal.io/server/common"
@@ -50,7 +45,7 @@ type (
 		executionManager persistence.ExecutionManager
 		logger           log.Logger
 		metricsHandler   metrics.Handler
-		s3cli            s3iface.S3API
+		s3cli            S3API
 		// only set in test code
 		historyIterator archiver.HistoryIterator
 	}
@@ -88,13 +83,7 @@ func newHistoryArchiver(
 	if len(config.Region) == 0 {
 		return nil, errEmptyAwsRegion
 	}
-	s3Config := &aws.Config{
-		Endpoint:         config.Endpoint,
-		Region:           aws.String(config.Region),
-		S3ForcePathStyle: aws.Bool(config.S3ForcePathStyle),
-		LogLevel:         (*aws.LogLevelType)(&config.LogLevel),
-	}
-	sess, err := session.NewSession(s3Config)
+	s3cli, err := newS3Client(config)
 	if err != nil {
 		return nil, err
 	}
@@ -103,7 +92,7 @@ func newHistoryArchiver(
 		executionManager: executionManager,
 		logger:           logger,
 		metricsHandler:   metricsHandler,
-		s3cli:            s3.New(sess),
+		s3cli:            s3cli,
 		historyIterator:  historyIterator,
 	}, nil
 }
@@ -352,12 +341,12 @@ func (h *historyArchiver) getHighestVersion(ctx context.Context, URI archiver.UR
 	defer cancel()
 	var prefix = constructHistoryKeyPrefix(URI.Path(), request.NamespaceID, request.WorkflowID, request.RunID) + "/"
 	results, err := h.s3cli.ListObjectsV2WithContext(ctx, &s3.ListObjectsV2Input{
-		Bucket:    aws.String(URI.Hostname()),
-		Prefix:    aws.String(prefix),
-		Delimiter: aws.String("/"),
+		Bucket:    ptrString(URI.Hostname()),
+		Prefix:    ptrString(prefix),
+		Delimiter: ptrString("/"),
 	})
 	if err != nil {
-		if aerr, ok := err.(awserr.Error); ok && aerr.Code() == s3.ErrCodeNoSuchBucket {
+		if strings.EqualFold(apiErrorCode(err), "NoSuchBucket") {
 			return nil, serviceerror.NewInvalidArgument(errBucketNotExists.Error())
 		}
 		return nil, err
@@ -378,29 +367,4 @@ func (h *historyArchiver) getHighestVersion(ctx context.Context, URI archiver.UR
 		return nil, archiver.ErrHistoryNotExist
 	}
 	return highestVersion, nil
-}
-
-func isRetryableError(err error) bool {
-	if err == nil {
-		return false
-	}
-	if aerr, ok := err.(awserr.Error); ok {
-		return isStatusCodeRetryable(aerr) || request.IsErrorRetryable(aerr) || request.IsErrorThrottle(aerr)
-	}
-	return false
-}
-
-func isStatusCodeRetryable(err error) bool {
-	if aerr, ok := err.(awserr.Error); ok {
-		if rerr, ok := err.(awserr.RequestFailure); ok {
-			if rerr.StatusCode() == 429 {
-				return true
-			}
-			if rerr.StatusCode() >= 500 && rerr.StatusCode() != 501 {
-				return true
-			}
-		}
-		return isStatusCodeRetryable(aerr.OrigErr())
-	}
-	return false
 }

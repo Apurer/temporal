@@ -14,10 +14,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/awserr"
-	"github.com/aws/aws-sdk-go/aws/request"
-	"github.com/aws/aws-sdk-go/service/s3"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 	enumspb "go.temporal.io/api/enums/v1"
@@ -90,7 +89,7 @@ func (s *historyArchiverSuite) SetupTest() {
 func setupFsEmulation(s3cli *mocks.MockS3API) {
 	fs := make(map[string][]byte)
 
-	putObjectFn := func(_ aws.Context, input *s3.PutObjectInput, _ ...request.Option) (*s3.PutObjectOutput, error) {
+	putObjectFn := func(_ context.Context, input *s3.PutObjectInput, _ ...func(*s3.Options)) (*s3.PutObjectOutput, error) {
 		buf := new(bytes.Buffer)
 		if _, err := buf.ReadFrom(input.Body); err != nil {
 			return nil, err
@@ -100,8 +99,8 @@ func setupFsEmulation(s3cli *mocks.MockS3API) {
 	}
 
 	s3cli.EXPECT().ListObjectsV2WithContext(gomock.Any(), gomock.Any()).DoAndReturn(
-		func(_ context.Context, input *s3.ListObjectsV2Input, opts ...request.Option) (*s3.ListObjectsV2Output, error) {
-			objects := make([]*s3.Object, 0)
+		func(_ context.Context, input *s3.ListObjectsV2Input, opts ...func(*s3.Options)) (*s3.ListObjectsV2Output, error) {
+			objects := make([]s3types.Object, 0)
 			commonPrefixMap := map[string]bool{}
 			for k := range fs {
 				if strings.HasPrefix(k, *input.Bucket+*input.Prefix) {
@@ -109,7 +108,7 @@ func setupFsEmulation(s3cli *mocks.MockS3API) {
 					keyWithoutPrefix := key[len(*input.Prefix):]
 					index := strings.Index(keyWithoutPrefix, "/")
 					if index == -1 || input.Delimiter == nil {
-						objects = append(objects, &s3.Object{
+						objects = append(objects, s3types.Object{
 							Key: aws.String(key),
 						})
 					} else {
@@ -117,9 +116,9 @@ func setupFsEmulation(s3cli *mocks.MockS3API) {
 					}
 				}
 			}
-			commonPrefixes := make([]*s3.CommonPrefix, 0)
+			commonPrefixes := make([]s3types.CommonPrefix, 0)
 			for k := range commonPrefixMap {
-				commonPrefixes = append(commonPrefixes, &s3.CommonPrefix{
+				commonPrefixes = append(commonPrefixes, s3types.CommonPrefix{
 					Prefix: aws.String(k),
 				})
 			}
@@ -180,20 +179,20 @@ func setupFsEmulation(s3cli *mocks.MockS3API) {
 	s3cli.EXPECT().PutObjectWithContext(gomock.Any(), gomock.Any()).DoAndReturn(putObjectFn).AnyTimes()
 
 	s3cli.EXPECT().HeadObjectWithContext(gomock.Any(), gomock.Any()).DoAndReturn(
-		func(ctx aws.Context, input *s3.HeadObjectInput, options ...request.Option) (*s3.HeadObjectOutput, error) {
+		func(ctx context.Context, input *s3.HeadObjectInput, options ...func(*s3.Options)) (*s3.HeadObjectOutput, error) {
 			_, ok := fs[*input.Bucket+*input.Key]
 			if !ok {
-				return nil, awserr.New("NotFound", "", nil)
+				return nil, newAPIError("NotFound", 404)
 			}
 
 			return &s3.HeadObjectOutput{}, nil
 		}).AnyTimes()
 
 	s3cli.EXPECT().GetObjectWithContext(gomock.Any(), gomock.Any()).DoAndReturn(
-		func(ctx aws.Context, input *s3.GetObjectInput, options ...request.Option) (*s3.GetObjectOutput, error) {
+		func(ctx context.Context, input *s3.GetObjectInput, options ...func(*s3.Options)) (*s3.GetObjectOutput, error) {
 			_, ok := fs[*input.Bucket+*input.Key]
 			if !ok {
-				return nil, awserr.New(s3.ErrCodeNoSuchKey, "", nil)
+				return nil, newAPIError("NoSuchKey", 404)
 			}
 
 			return &s3.GetObjectOutput{
@@ -226,9 +225,9 @@ func (s *historyArchiverSuite) TestValidateURI() {
 	}
 
 	s.s3cli.EXPECT().HeadBucketWithContext(gomock.Any(), gomock.Any()).DoAndReturn(
-		func(ctx aws.Context, input *s3.HeadBucketInput, options ...request.Option) (*s3.HeadBucketOutput, error) {
+		func(ctx context.Context, input *s3.HeadBucketInput, options ...func(*s3.Options)) (*s3.HeadBucketOutput, error) {
 			if *input.Bucket != s.testArchivalURI.Hostname() {
-				return nil, awserr.New("NotFound", "", nil)
+				return nil, newAPIError("NotFound", 404)
 			}
 
 			return &s3.HeadBucketOutput{}, nil

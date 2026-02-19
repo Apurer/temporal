@@ -6,15 +6,18 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"strings"
 	"time"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/awserr"
-	"github.com/aws/aws-sdk-go/service/s3"
-	"github.com/aws/aws-sdk-go/service/s3/s3iface"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/aws/smithy-go"
 	commonpb "go.temporal.io/api/common/v1"
 	historypb "go.temporal.io/api/history/v1"
 	"go.temporal.io/api/serviceerror"
@@ -22,10 +25,57 @@ import (
 	archiverspb "go.temporal.io/server/api/archiver/v1"
 	"go.temporal.io/server/common/archiver"
 	"go.temporal.io/server/common/codec"
+	"go.temporal.io/server/common/config"
 	"go.temporal.io/server/common/searchattribute"
 	"go.uber.org/multierr"
 	"google.golang.org/protobuf/proto"
 )
+
+type S3API interface {
+	HeadBucketWithContext(context.Context, *s3.HeadBucketInput, ...func(*s3.Options)) (*s3.HeadBucketOutput, error)
+	HeadObjectWithContext(context.Context, *s3.HeadObjectInput, ...func(*s3.Options)) (*s3.HeadObjectOutput, error)
+	PutObjectWithContext(context.Context, *s3.PutObjectInput, ...func(*s3.Options)) (*s3.PutObjectOutput, error)
+	GetObjectWithContext(context.Context, *s3.GetObjectInput, ...func(*s3.Options)) (*s3.GetObjectOutput, error)
+	ListObjectsV2WithContext(context.Context, *s3.ListObjectsV2Input, ...func(*s3.Options)) (*s3.ListObjectsV2Output, error)
+}
+
+type s3ClientAdapter struct {
+	client *s3.Client
+}
+
+func (a *s3ClientAdapter) HeadBucketWithContext(ctx context.Context, input *s3.HeadBucketInput, opts ...func(*s3.Options)) (*s3.HeadBucketOutput, error) {
+	return a.client.HeadBucket(ctx, input, opts...)
+}
+
+func (a *s3ClientAdapter) HeadObjectWithContext(ctx context.Context, input *s3.HeadObjectInput, opts ...func(*s3.Options)) (*s3.HeadObjectOutput, error) {
+	return a.client.HeadObject(ctx, input, opts...)
+}
+
+func (a *s3ClientAdapter) PutObjectWithContext(ctx context.Context, input *s3.PutObjectInput, opts ...func(*s3.Options)) (*s3.PutObjectOutput, error) {
+	return a.client.PutObject(ctx, input, opts...)
+}
+
+func (a *s3ClientAdapter) GetObjectWithContext(ctx context.Context, input *s3.GetObjectInput, opts ...func(*s3.Options)) (*s3.GetObjectOutput, error) {
+	return a.client.GetObject(ctx, input, opts...)
+}
+
+func (a *s3ClientAdapter) ListObjectsV2WithContext(ctx context.Context, input *s3.ListObjectsV2Input, opts ...func(*s3.Options)) (*s3.ListObjectsV2Output, error) {
+	return a.client.ListObjectsV2(ctx, input, opts...)
+}
+
+func newS3Client(cfg *config.S3Archiver) (S3API, error) {
+	awsCfg, err := awsconfig.LoadDefaultConfig(context.Background(), awsconfig.WithRegion(cfg.Region))
+	if err != nil {
+		return nil, err
+	}
+	client := s3.NewFromConfig(awsCfg, func(options *s3.Options) {
+		options.UsePathStyle = cfg.S3ForcePathStyle
+		if cfg.Endpoint != nil && *cfg.Endpoint != "" {
+			options.BaseEndpoint = aws.String(*cfg.Endpoint)
+		}
+	})
+	return &s3ClientAdapter{client: client}, nil
+}
 
 // encoding & decoding util
 
@@ -76,11 +126,11 @@ func SoftValidateURI(URI archiver.URI) error {
 	return nil
 }
 
-func BucketExists(ctx context.Context, s3cli s3iface.S3API, URI archiver.URI) error {
+func BucketExists(ctx context.Context, s3cli S3API, URI archiver.URI) error {
 	ctx, cancel := ensureContextTimeout(ctx)
 	defer cancel()
 	_, err := s3cli.HeadBucketWithContext(ctx, &s3.HeadBucketInput{
-		Bucket: aws.String(URI.Hostname()),
+		Bucket: ptrString(URI.Hostname()),
 	})
 	if err == nil {
 		return nil
@@ -91,12 +141,12 @@ func BucketExists(ctx context.Context, s3cli s3iface.S3API, URI archiver.URI) er
 	return err
 }
 
-func KeyExists(ctx context.Context, s3cli s3iface.S3API, URI archiver.URI, key string) (bool, error) {
+func KeyExists(ctx context.Context, s3cli S3API, URI archiver.URI, key string) (bool, error) {
 	ctx, cancel := ensureContextTimeout(ctx)
 	defer cancel()
 	_, err := s3cli.HeadObjectWithContext(ctx, &s3.HeadObjectInput{
-		Bucket: aws.String(URI.Hostname()),
-		Key:    aws.String(key),
+		Bucket: ptrString(URI.Hostname()),
+		Key:    ptrString(key),
 	})
 	if err != nil {
 		if IsNotFoundError(err) {
@@ -108,8 +158,12 @@ func KeyExists(ctx context.Context, s3cli s3iface.S3API, URI archiver.URI, key s
 }
 
 func IsNotFoundError(err error) bool {
-	aerr, ok := err.(awserr.Error)
-	return ok && (aerr.Code() == "NotFound")
+	code := strings.ToLower(apiErrorCode(err))
+	if code == "notfound" || code == "nosuchkey" || code == "nosuchbucket" {
+		return true
+	}
+	status, ok := httpStatusCode(err)
+	return ok && status == 404
 }
 
 // Key construction
@@ -185,43 +239,39 @@ func ensureContextTimeout(ctx context.Context) (context.Context, context.CancelF
 	}
 	return context.WithTimeout(ctx, defaultBlobstoreTimeout)
 }
-func Upload(ctx context.Context, s3cli s3iface.S3API, URI archiver.URI, key string, data []byte) error {
+func Upload(ctx context.Context, s3cli S3API, URI archiver.URI, key string, data []byte) error {
 	ctx, cancel := ensureContextTimeout(ctx)
 	defer cancel()
 
 	_, err := s3cli.PutObjectWithContext(ctx, &s3.PutObjectInput{
-		Bucket: aws.String(URI.Hostname()),
-		Key:    aws.String(key),
+		Bucket: ptrString(URI.Hostname()),
+		Key:    ptrString(key),
 		Body:   bytes.NewReader(data),
 	})
 	if err != nil {
-		if aerr, ok := err.(awserr.Error); ok {
-			if aerr.Code() == s3.ErrCodeNoSuchBucket {
-				return serviceerror.NewInvalidArgument(errBucketNotExists.Error())
-			}
+		if strings.EqualFold(apiErrorCode(err), "NoSuchBucket") {
+			return serviceerror.NewInvalidArgument(errBucketNotExists.Error())
 		}
 		return err
 	}
 	return nil
 }
 
-func Download(ctx context.Context, s3cli s3iface.S3API, URI archiver.URI, key string) ([]byte, error) {
+func Download(ctx context.Context, s3cli S3API, URI archiver.URI, key string) ([]byte, error) {
 	ctx, cancel := ensureContextTimeout(ctx)
 	defer cancel()
 	result, err := s3cli.GetObjectWithContext(ctx, &s3.GetObjectInput{
-		Bucket: aws.String(URI.Hostname()),
-		Key:    aws.String(key),
+		Bucket: ptrString(URI.Hostname()),
+		Key:    ptrString(key),
 	})
 
 	if err != nil {
-		if aerr, ok := err.(awserr.Error); ok {
-			if aerr.Code() == s3.ErrCodeNoSuchBucket {
-				return nil, serviceerror.NewInvalidArgument(errBucketNotExists.Error())
-			}
-
-			if aerr.Code() == s3.ErrCodeNoSuchKey {
-				return nil, serviceerror.NewNotFound(archiver.ErrHistoryNotExist.Error())
-			}
+		code := apiErrorCode(err)
+		if strings.EqualFold(code, "NoSuchBucket") {
+			return nil, serviceerror.NewInvalidArgument(errBucketNotExists.Error())
+		}
+		if strings.EqualFold(code, "NoSuchKey") || strings.EqualFold(code, "NotFound") {
+			return nil, serviceerror.NewNotFound(archiver.ErrHistoryNotExist.Error())
 		}
 		return nil, err
 	}
@@ -237,6 +287,63 @@ func Download(ctx context.Context, s3cli s3iface.S3API, URI archiver.URI, key st
 		return nil, err
 	}
 	return body, nil
+}
+
+func ptrString(v string) *string {
+	return &v
+}
+
+func apiErrorCode(err error) string {
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) {
+		return apiErr.ErrorCode()
+	}
+
+	var noSuchBucket *s3types.NoSuchBucket
+	if errors.As(err, &noSuchBucket) {
+		return "NoSuchBucket"
+	}
+
+	var noSuchKey *s3types.NoSuchKey
+	if errors.As(err, &noSuchKey) {
+		return "NoSuchKey"
+	}
+
+	return ""
+}
+
+func httpStatusCode(err error) (int, bool) {
+	var statusErr interface {
+		HTTPStatusCode() int
+	}
+	if errors.As(err, &statusErr) {
+		return statusErr.HTTPStatusCode(), true
+	}
+	return 0, false
+}
+
+func isRetryableError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if isStatusCodeRetryable(err) {
+		return true
+	}
+
+	code := strings.ToLower(apiErrorCode(err))
+	return strings.Contains(code, "throttl") || strings.Contains(code, "timeout") || strings.Contains(code, "temporar")
+}
+
+func isStatusCodeRetryable(err error) bool {
+	status, ok := httpStatusCode(err)
+	if !ok {
+		var netErr net.Error
+		return errors.As(err, &netErr)
+	}
+	if status == 429 {
+		return true
+	}
+	return status >= 500 && status != 501
 }
 
 func historyMutated(request *archiver.ArchiveHistoryRequest, historyBatches []*historypb.History, isLast bool) bool {
