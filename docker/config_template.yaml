@@ -322,8 +322,8 @@ clusterMetadata:
 dcRedirectionPolicy:
     policy: "noop"
 
-{{- $s3ArchivalEnabled := default .Env.ENABLE_S3_ARCHIVAL "false" | lower -}}
-{{- $s3ArchivalEndpoint := default .Env.S3_ARCHIVAL_ENDPOINT "" -}}
+{{ $s3ArchivalEnabled := default .Env.ENABLE_S3_ARCHIVAL "false" | lower }}
+{{ $s3ArchivalEndpoint := default .Env.S3_ARCHIVAL_ENDPOINT "" }}
 archival:
   history:
     state: "enabled"
